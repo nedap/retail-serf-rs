@@ -1,10 +1,8 @@
-use futures::{AsyncBufReadExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use std::io::Read;
-use std::net::{Ipv4Addr, SocketAddr};
+use futures::{StreamExt};
+
 use std::sync::Arc;
 
-use log::{logger, Level, Metadata, Record};
+use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
 const SERF_ADDRESS: &'static str = "0.0.0.0";
 const SERF_PORT: &'static str = ":7373";
@@ -33,7 +31,7 @@ pub fn init() -> Result<(), SetLoggerError> {
 
 #[tokio::main]
 async fn main() {
-    init();
+    init().unwrap();
     let mut serf_address: String = SERF_ADDRESS.into();
     serf_address.push_str(SERF_PORT);
     let socket = serf_address
@@ -71,8 +69,8 @@ async fn main() {
         );
     }
 
-    let mut test = serf_rpc::Client::stream(&Arc::new(client), "member-failed");
-    let mut result = test.take(1);
+    let test = serf_rpc::Client::stream(&Arc::new(client), "member-failed");
+    let result = test.take(1);
     println!(
         "{:?}",
         result.collect::<Vec<_>>().await[0].as_ref().unwrap()

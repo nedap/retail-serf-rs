@@ -29,9 +29,9 @@ pub use stream::RPCStream;
 #[doc(hidden)]
 pub struct SeqRead<'a>(&'a mut BufReader<TcpStream>);
 impl<'a> SeqRead<'a> {
-    fn read_msg<T: DeserializeOwned + Debug>(mut self) -> T {
+    fn read_msg<T: DeserializeOwned + Debug>(self) -> T {
         // annoyingly, we pretty much have to panic, because otherwise the reader is left in an invalid state
-        rmp_serde::from_read(&mut self.0).unwrap()
+        rmp_serde::from_read(self.0).unwrap()
     }
 }
 

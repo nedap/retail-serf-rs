@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv6Addr},
 };
 
 use crate::{RPCResponse, RPCResult};
@@ -169,13 +169,23 @@ where
     D: serde::Deserializer<'de>,
 {
     let bytes: Vec<u8> = serde_bytes::deserialize(de)?;
-    let slice: Result<[u8; 16], _> = bytes.try_into();
-    match slice {
-        Ok([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, a, b, c, d]) => {
-            Ok(IpAddr::V4(Ipv4Addr::new(a, b, c, d)))
+
+    let maybe_ipv6: Result<[u8; 16], _> = bytes.try_into();
+    match maybe_ipv6 {
+        Ok(ipv6) => {
+            let ipv6 = Ipv6Addr::from(ipv6);
+            match ipv6.to_ipv4() {
+                None => Ok(ipv6.into()),
+                Some(ipv4) => Ok(ipv4.into())
+            }
+        },
+        Err(bytes) => {
+            let maybe_ipv4: Result<[u8; 4], _> = bytes.try_into();
+            match maybe_ipv4 {
+                Ok(ipv4) => Ok(ipv4.into()),
+                Err(bytes) => Err(D::Error::custom(format!("Could not parse {bytes:?} into IP address"))),
+            }
         }
-        Ok(ipv6) => Ok(IpAddr::V6(Ipv6Addr::from(ipv6))),
-        Err(vec) => Err(D::Error::custom(format!("Could not parse {vec:?} into IP address"))),
     }
 }
 
