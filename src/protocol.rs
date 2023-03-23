@@ -175,7 +175,7 @@ where
             Ok(IpAddr::V4(Ipv4Addr::new(a, b, c, d)))
         }
         Ok(ipv6) => Ok(IpAddr::V6(Ipv6Addr::from(ipv6))),
-        Err(_) => Err(D::Error::custom("Invalid value")),
+        Err(vec) => Err(D::Error::custom(format!("Could not parse {vec:?} into IP address"))),
     }
 }
 
