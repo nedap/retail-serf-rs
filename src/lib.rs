@@ -52,7 +52,7 @@ type RPCResult<T = ()> = Result<T, String>;
 #[derive(Clone)]
 pub struct Client {
     dispatch: Arc<Mutex<DispatchMap>>,
-    tx: std::sync::mpsc::Sender<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
 struct DispatchMap {
@@ -65,7 +65,7 @@ impl Client {
     ///
     /// Waits for handshake, and optionally for authentication if an auth key is provided.
     pub async fn connect(rpc_addr: SocketAddr, auth_key: Option<&str>) -> RPCResult<Self> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
         let dispatch = Arc::new(Mutex::new(DispatchMap {
             map: HashMap::new(),
@@ -91,7 +91,7 @@ impl Client {
 
             // write loop
             std::thread::spawn(move || {
-                while let Ok(buf) = rx.recv() {
+                while let Some(buf) = rx.blocking_recv() {
                     stream.write_all(&buf).unwrap();
                 }
             });
@@ -168,7 +168,7 @@ impl Client {
         .unwrap();
         buf.extend_from_slice(&cmd.body);
 
-        self.tx.send(buf).unwrap();
+        self.tx.blocking_send(buf).unwrap();
 
         seq
     }
