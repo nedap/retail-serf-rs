@@ -1,4 +1,4 @@
-use futures::{StreamExt};
+use futures::StreamExt;
 
 use std::sync::Arc;
 

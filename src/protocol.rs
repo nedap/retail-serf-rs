@@ -176,14 +176,16 @@ where
             let ipv6 = Ipv6Addr::from(ipv6);
             match ipv6.to_ipv4() {
                 None => Ok(ipv6.into()),
-                Some(ipv4) => Ok(ipv4.into())
+                Some(ipv4) => Ok(ipv4.into()),
             }
-        },
+        }
         Err(bytes) => {
             let maybe_ipv4: Result<[u8; 4], _> = bytes.try_into();
             match maybe_ipv4 {
                 Ok(ipv4) => Ok(ipv4.into()),
-                Err(bytes) => Err(D::Error::custom(format!("Could not parse {bytes:?} into IP address"))),
+                Err(bytes) => Err(D::Error::custom(format!(
+                    "Could not parse {bytes:?} into IP address"
+                ))),
             }
         }
     }
