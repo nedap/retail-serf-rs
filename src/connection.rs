@@ -11,7 +11,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     sync::mpsc::Receiver,
 };
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 
 pub(crate) struct ClientConnection {
     dispatch: Arc<Mutex<DispatchMap>>,
@@ -23,6 +23,7 @@ enum SerfError {
     Io(io::Error),
     Decode(rmp_serde::decode::Error),
     Receive(RecvError),
+    Internal(String),
 }
 
 impl Display for SerfError {
@@ -31,6 +32,7 @@ impl Display for SerfError {
             SerfError::Io(e) => write!(f, "IO error: {}", e),
             SerfError::Decode(e) => write!(f, "Decode error: {}", e),
             SerfError::Receive(e) => write!(f, "Receive error: {}", e),
+            SerfError::Internal(e) => write!(f, "Internal error: {}", e),
         }
     }
 }
@@ -52,6 +54,12 @@ impl From<rmp_serde::decode::Error> for SerfError {
 impl From<RecvError> for SerfError {
     fn from(e: RecvError) -> Self {
         SerfError::Receive(e)
+    }
+}
+
+impl From<JoinError> for SerfError {
+    fn from(e: JoinError) -> Self {
+        SerfError::Internal(e.to_string())
     }
 }
 
@@ -97,14 +105,21 @@ impl ClientConnection {
         tx_handle: JoinHandle<SerfResult>,
         rx_handle: JoinHandle<SerfResult>,
     ) {
-        let (thread, error) = loop {
+        let (thread, join_result) = loop {
             tokio::select! {
-                Err(error) = tx_handle => break ("write", error),
-                Err(error) = rx_handle => break ("read", error),
+                res = tx_handle => break ("write", res),
+                res = rx_handle => break ("read", res),
             }
         };
+        let error = match join_result {
+            Ok(Ok(_)) => Err(SerfError::Internal(
+                "thread terminated unexpectedly without an error".to_string(),
+            )),
+            Ok(error) => error,
+            Err(e) => Err(e.into()),
+        };
 
-        error!("Error in connection {thread} thread: {error}");
+        error!("Error in connection {thread} thread: {error:?}");
 
         info!("Cleaning up Serf threads");
         drop(stream);
