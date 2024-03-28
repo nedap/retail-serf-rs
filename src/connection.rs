@@ -130,36 +130,24 @@ impl ClientConnection {
     fn start_serf_rx(&mut self) -> Result<JoinHandle<SerfResult>, String> {
         let dispatch = Arc::clone(&self.dispatch);
         let mut reader = BufReader::new(self.stream.try_clone().map_err(|x| x.to_string())?);
-        Ok(tokio::task::spawn_blocking(move || {
-            loop {
-                let ResponseHeader { seq, error } = rmp_serde::from_read(&mut reader)?;
-                let seq_handler = {
-                    let mut dispatch = dispatch.lock().unwrap();
-                    match dispatch.map.get(&seq) {
-                        Some(v) => {
-                            if v.streaming() {
-                                if !v.stream_acked() {
-                                    continue;
-                                }
-                                v.clone()
-                            } else {
-                                dispatch.map.remove(&seq).unwrap()
-                            }
-                        }
-                        None => {
-                            // response with no handler, ignore
-                            continue;
-                        }
+        Ok(tokio::task::spawn_blocking(move || loop {
+            let ResponseHeader { seq, error } = rmp_serde::from_read(&mut reader)?;
+            let mut dispatch = dispatch.lock().unwrap();
+            if let Some(v) = dispatch.map.get(&seq) {
+                let seq_handler = if v.streaming() {
+                    if !v.stream_acked() {
+                        continue;
                     }
+                    v.clone()
+                } else {
+                    dispatch.map.remove(&seq).unwrap()
                 };
 
-                let res = if error.is_empty() {
+                seq_handler.handle(if error.is_empty() {
                     Ok(SeqRead(&mut reader))
                 } else {
                     Err(error)
-                };
-
-                seq_handler.handle(res);
+                });
             }
         }))
     }
