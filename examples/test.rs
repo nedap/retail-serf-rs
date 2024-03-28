@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
-const SERF_ADDRESS: &'static str = "0.0.0.0";
-const SERF_PORT: &'static str = ":7373";
+const SERF_ADDRESS: &str = "0.0.0.0";
+const SERF_PORT: &str = ":7373";
 
 struct SimpleLogger;
 
