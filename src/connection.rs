@@ -1,73 +1,138 @@
-use std::{
-    net::{SocketAddr, TcpStream},
-    sync::{atomic::AtomicBool, mpsc::Receiver},
-    thread::JoinHandle,
-};
-
-use std::io;
-use std::sync::{Arc, Mutex};
-
+use crate::protocol::ResponseHeader;
+use crate::{DispatchMap, SeqRead};
 use io::{BufReader, Write};
 use log::{error, info};
-
-pub use crate::request::RPCRequest;
-pub use crate::stream::RPCStream;
-use crate::{DispatchMap, SeqRead};
-use tokio::sync::Notify;
+use std::error::Error;
+use std::fmt::Display;
+use std::io;
+use std::sync::mpsc::RecvError;
+use std::sync::{Arc, Mutex};
+use std::{
+    net::{SocketAddr, TcpStream},
+    sync::mpsc::Receiver,
+};
+use tokio::task::JoinHandle;
 
 pub(crate) struct ClientConnection {
-    notifier: Arc<Notify>,
-    cancel: Arc<AtomicBool>,
     dispatch: Arc<Mutex<DispatchMap>>,
     stream: TcpStream,
 }
 
+#[derive(Debug)]
+enum SerfError {
+    Io(io::Error),
+    Decode(rmp_serde::decode::Error),
+    Receive(RecvError),
+}
+
+impl Display for SerfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SerfError::Io(e) => write!(f, "IO error: {}", e),
+            SerfError::Decode(e) => write!(f, "Decode error: {}", e),
+            SerfError::Receive(e) => write!(f, "Receive error: {}", e),
+        }
+    }
+}
+
+impl Error for SerfError {}
+
+impl From<io::Error> for SerfError {
+    fn from(e: io::Error) -> Self {
+        SerfError::Io(e)
+    }
+}
+
+impl From<rmp_serde::decode::Error> for SerfError {
+    fn from(e: rmp_serde::decode::Error) -> Self {
+        SerfError::Decode(e)
+    }
+}
+
+impl From<RecvError> for SerfError {
+    fn from(e: RecvError) -> Self {
+        SerfError::Receive(e)
+    }
+}
+
+type SerfResult = Result<(), SerfError>;
+
 impl ClientConnection {
-    fn start_serf_tx(
+    pub(crate) fn spawn(
+        rpc_addr: SocketAddr,
+        serf_rx: Receiver<Vec<u8>>,
+        dispatch: Arc<Mutex<DispatchMap>>,
+    ) -> Result<Self, String> {
+        info!("Connecting to the Serf instance");
+        let stream = TcpStream::connect(rpc_addr).map_err(|e| e.to_string())?;
+        info!("Connected to the Serf instance");
+
+        let mut connection = Self {
+            dispatch: Arc::clone(&dispatch),
+            stream,
+        };
+
+        let tx_handle = connection.start_serf_tx(serf_rx)?;
+        let rx_handle = connection.start_serf_rx()?;
+        connection.start_connection_watcher(tx_handle, rx_handle)?;
+        Ok(connection)
+    }
+
+    fn start_connection_watcher(
         &mut self,
-        rx_rw: std::sync::mpsc::Receiver<Vec<u8>>,
-    ) -> Result<JoinHandle<()>, String> {
-        let notifier = Arc::clone(&self.notifier);
-        let cancel = Arc::clone(&self.cancel);
-        let mut stream = self.stream.try_clone().map_err(|x| x.to_string())?;
-        Ok(std::thread::spawn(move || loop {
-            match rx_rw.recv() {
-                Ok(x) => {
-                    if let Err(e) = stream.write_all(&x) {
-                        error!("Error while writing to serf stream: {e}");
-                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                        notifier.notify_one();
-                        return;
-                    }
-                }
-                Err(e) => {
-                    error!("Error while receiving value from channel: {e}");
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                    notifier.notify_one();
-                    return;
-                }
-            }
+        tx_handle: JoinHandle<SerfResult>,
+        rx_handle: JoinHandle<SerfResult>,
+    ) -> Result<std::thread::JoinHandle<()>, String> {
+        let dispatch = Arc::clone(&self.dispatch);
+        let stream = self.stream.try_clone().map_err(|x| x.to_string())?;
+        Ok(std::thread::spawn(move || {
+            Self::connection_watcher(dispatch, stream, tx_handle, rx_handle)
         }))
     }
 
-    fn start_serf_rx(&mut self) -> Result<JoinHandle<()>, String> {
-        let notifier = Arc::clone(&self.notifier);
-        let cancel = Arc::clone(&self.cancel);
+    #[tokio::main(flavor = "current_thread")]
+    async fn connection_watcher(
+        dispatch: Arc<Mutex<DispatchMap>>,
+        stream: TcpStream,
+        tx_handle: JoinHandle<SerfResult>,
+        rx_handle: JoinHandle<SerfResult>,
+    ) {
+        let (thread, error) = loop {
+            tokio::select! {
+                Err(error) = tx_handle => break ("write", error),
+                Err(error) = rx_handle => break ("read", error),
+            }
+        };
+
+        error!("Error in connection {thread} thread: {error}");
+
+        info!("Cleaning up Serf threads");
+        drop(stream);
+
+        info!("Cleaning up existing Serf requests by responding with an error");
+        for (_, value) in dispatch.lock().unwrap().map.drain() {
+            value.handle(Err(
+                "Request was cancelled due to an error in the SERF connection".to_string(),
+            ));
+        }
+    }
+
+    fn start_serf_tx(
+        &mut self,
+        rx_rw: Receiver<Vec<u8>>,
+    ) -> Result<JoinHandle<SerfResult>, String> {
+        let mut stream = self.stream.try_clone().map_err(|x| x.to_string())?;
+        Ok(tokio::task::spawn_blocking(move || loop {
+            stream.write_all(&rx_rw.recv()?)?;
+        }))
+    }
+
+    fn start_serf_rx(&mut self) -> Result<JoinHandle<SerfResult>, String> {
         let dispatch = Arc::clone(&self.dispatch);
         let mut reader = BufReader::new(self.stream.try_clone().map_err(|x| x.to_string())?);
-        Ok(std::thread::spawn(move || {
+        Ok(tokio::task::spawn_blocking(move || {
             loop {
-                let crate::protocol::ResponseHeader { seq, error } =
-                    match rmp_serde::from_read(&mut reader) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            error!("Error while reading messagepack: {e}");
-                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                            notifier.notify_one();
-                            return;
-                        }
-                    };
-
+                let ResponseHeader { seq, error } = rmp_serde::from_read(&mut reader)?;
                 let seq_handler = {
                     let mut dispatch = dispatch.lock().unwrap();
                     match dispatch.map.get(&seq) {
@@ -97,84 +162,5 @@ impl ClientConnection {
                 seq_handler.handle(res);
             }
         }))
-    }
-
-    #[tokio::main(flavor = "current_thread")]
-    async fn connection_watcher(
-        dispatch: Arc<Mutex<DispatchMap>>,
-        cancel: Arc<AtomicBool>,
-        thread_notifier: Arc<Notify>,
-        stream: TcpStream,
-        serf_tx_handle: JoinHandle<()>,
-        serf_rx_handle: JoinHandle<()>,
-    ) {
-        while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            info!("Waiting until connection threads send notification");
-            thread_notifier.notified().await;
-        }
-
-        info!("Cleaning up SERF threads");
-        drop(stream);
-
-        info!("Cleaning up existing SERF requests by responding with an error");
-        let mut lock = dispatch.lock().unwrap();
-        let map = &mut lock.map;
-        for (_, value) in map.iter() {
-            value.handle(Err(
-                "Request was cancelled due to an error in the SERF connection".to_string(),
-            ));
-        }
-        map.clear();
-        drop(lock);
-
-        if let Err(e) = serf_tx_handle.join() {
-            error!("Error in connection write thread: {e:?}");
-        }
-        if let Err(e) = serf_rx_handle.join() {
-            error!("Error in connection read thread: {e:?}");
-        }
-    }
-
-    fn start_connection_watcher(
-        &mut self,
-        serf_tx_handle: JoinHandle<()>,
-        serf_rx_handle: JoinHandle<()>,
-    ) -> Result<JoinHandle<()>, String> {
-        let notifier = Arc::clone(&self.notifier);
-        let cancel = Arc::clone(&self.cancel);
-        let dispatch = Arc::clone(&self.dispatch);
-        let stream = self.stream.try_clone().map_err(|x| x.to_string())?;
-        Ok(std::thread::spawn(move || {
-            Self::connection_watcher(
-                dispatch,
-                cancel,
-                notifier,
-                stream,
-                serf_tx_handle,
-                serf_rx_handle,
-            )
-        }))
-    }
-
-    pub(crate) fn spawn(
-        rpc_addr: SocketAddr,
-        serf_rx: Receiver<Vec<u8>>,
-        dispatch: Arc<Mutex<DispatchMap>>,
-    ) -> Result<Self, String> {
-        info!("Connecting to the Serf instance");
-        let stream = TcpStream::connect(rpc_addr).map_err(|e| e.to_string())?;
-        info!("Connected to the Serf instance");
-
-        let mut connection = Self {
-            notifier: Arc::new(Notify::new()),
-            cancel: Arc::new(AtomicBool::new(false)),
-            dispatch: Arc::clone(&dispatch),
-            stream,
-        };
-
-        let tx_handle = connection.start_serf_tx(serf_rx)?;
-        let rx_handle = connection.start_serf_rx()?;
-        connection.start_connection_watcher(tx_handle, rx_handle)?;
-        Ok(connection)
     }
 }

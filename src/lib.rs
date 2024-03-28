@@ -77,9 +77,8 @@ impl Client {
     pub async fn connect(rpc_addr: SocketAddr, auth_key: Option<&str>) -> RPCResult<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let dispatch = Arc::new(Mutex::new(DispatchMap::new()));
-        let dispatch_connection = Arc::clone(&dispatch);
 
-        ClientConnection::spawn(rpc_addr, rx, dispatch_connection)?;
+        ClientConnection::spawn(rpc_addr, rx, dispatch.clone())?;
         let client = Client { dispatch, tx };
         client.handshake(MAX_IPC_VERSION).await?;
         if let Some(auth_key) = auth_key {
