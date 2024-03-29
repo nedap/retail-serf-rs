@@ -7,12 +7,13 @@ use std::{
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use io::{BufReader, Write};
-use log::info;
+use connection::ClientConnection;
+use io::BufReader;
 use protocol::RequestHeader;
 use serde::de::DeserializeOwned;
 const MAX_IPC_VERSION: u32 = 1;
 
+mod connection;
 mod coordinates;
 mod members;
 mod request;
@@ -60,79 +61,26 @@ struct DispatchMap {
     next_seq: u64,
 }
 
+impl DispatchMap {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            next_seq: 0,
+        }
+    }
+}
+
 impl Client {
     /// Connect to hub.
     ///
     /// Waits for handshake, and optionally for authentication if an auth key is provided.
     pub async fn connect(rpc_addr: SocketAddr, auth_key: Option<&str>) -> RPCResult<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
+        let dispatch = Arc::new(Mutex::new(DispatchMap::new()));
 
-        let dispatch = Arc::new(Mutex::new(DispatchMap {
-            map: HashMap::new(),
-            next_seq: 0,
-        }));
-
+        ClientConnection::spawn(rpc_addr, rx, dispatch.clone())?;
         let client = Client { dispatch, tx };
-
-        let dispatch = Arc::downgrade(&client.dispatch);
-
-        std::thread::spawn(move || {
-            let mut stream = {
-                info!("Connecting to the Serf instance");
-                loop {
-                    if let Ok(stream) = TcpStream::connect(rpc_addr) {
-                        info!("Connected to the Serf instance");
-                        break stream;
-                    }
-                }
-            };
-            // clone the stream to create a reader
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-
-            // write loop
-            std::thread::spawn(move || {
-                while let Ok(buf) = rx.recv() {
-                    stream.write_all(&buf).unwrap();
-                }
-            });
-
-            // read loop
-            while let Some(dispatch) = dispatch.upgrade() {
-                let protocol::ResponseHeader { seq, error } =
-                    rmp_serde::from_read(&mut reader).unwrap();
-
-                let seq_handler = {
-                    let mut dispatch = dispatch.lock().unwrap();
-                    match dispatch.map.get(&seq) {
-                        Some(v) => {
-                            if v.streaming() {
-                                if !v.stream_acked() {
-                                    continue;
-                                }
-                                v.clone()
-                            } else {
-                                dispatch.map.remove(&seq).unwrap()
-                            }
-                        }
-                        None => {
-                            // response with no handler, ignore
-                            continue;
-                        }
-                    }
-                };
-
-                let res = if error.is_empty() {
-                    Ok(SeqRead(&mut reader))
-                } else {
-                    Err(error)
-                };
-
-                seq_handler.handle(res);
-            }
-        });
-
         client.handshake(MAX_IPC_VERSION).await?;
-
         if let Some(auth_key) = auth_key {
             client.auth(auth_key).await?;
         }
