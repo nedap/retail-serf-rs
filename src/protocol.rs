@@ -345,10 +345,7 @@ pub enum StreamMessage {
         members: Vec<Member>,
     },
     #[serde(rename = "member-update")]
-    MemberUpdate {
-        #[serde(rename = "Members")]
-        members: Vec<Member>,
-    },
+    MemberUpdate,
     #[serde(rename = "member-leave")]
     MemberLeave {
         #[serde(rename = "Members")]
