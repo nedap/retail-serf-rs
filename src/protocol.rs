@@ -218,7 +218,7 @@ req! {
 req! {
     "tags"
     /// Modifies the tags of the current node
-    pub tags(add_tags: &[&str], delete_tags: &[&str]) -> MembersResponse {
+    pub tags(add_tags: &HashMap<String, String>, delete_tags: &[&str]) -> MembersResponse {
         "Tags": add_tags,
         "DeleteTags": delete_tags
     }
@@ -341,6 +341,11 @@ pub enum StreamMessage {
     },
     #[serde(rename = "member-join")]
     MemberJoin {
+        #[serde(rename = "Members")]
+        members: Vec<Member>,
+    },
+    #[serde(rename = "member-update")]
+    MemberUpdate {
         #[serde(rename = "Members")]
         members: Vec<Member>,
     },
