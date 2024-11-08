@@ -1,12 +1,12 @@
+use crate::{RPCResponse, RPCResult};
+use serde::de::Error;
+use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv6Addr},
 };
-
-use crate::{RPCResponse, RPCResult};
-use serde::de::Error;
-use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -53,7 +53,7 @@ macro_rules! req {
     ) => {
         impl crate::Client {
             $(#[$meta])*
-            $vis fn $ident<'a>(&'a self$(, $arg: $arg_ty)*) -> crate::RPCRequest<'a, $res> {
+            $vis fn $ident(&self$(, $arg: $arg_ty)*) -> crate::RPCRequest<$res> {
                 #[allow(unused_mut)]
                 let mut buf = Vec::new();
 
@@ -68,12 +68,13 @@ macro_rules! req {
 macro_rules! stream {
     (
         $name:literal
-
+        $(#[$meta:meta])*
         $vis:vis $ident:ident( $($arg:ident: $arg_ty:ty),* ) -> $res:ty $({
             $($key:literal: $val:expr),*
         })?
     ) => {
         impl crate::Client {
+            $(#[$meta])*
             $vis fn $ident(self: &std::sync::Arc<Self>$(, $arg: $arg_ty)*) -> crate::RPCStream<$res> {
                 #[allow(unused_mut)]
                 let mut buf = Vec::new();
@@ -130,7 +131,7 @@ req! {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct JoinResponse {
     #[serde(rename = "Num")]
     pub nodes_joined: u64,
@@ -247,7 +248,7 @@ req! {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct Coordinate {
     pub adjustment: f32,
@@ -256,7 +257,7 @@ pub struct Coordinate {
     pub vec: [f32; 8],
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct CoordinateResponse {
     pub ok: bool,
@@ -275,12 +276,12 @@ req! {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Agent {
     pub name: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct RuntimeInfo {
     pub os: String,
     pub arch: String,
@@ -290,7 +291,7 @@ pub struct RuntimeInfo {
     pub cpu_count: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SerfInfo {
     pub failed: String,
     pub left: String,
@@ -303,7 +304,7 @@ pub struct SerfInfo {
     pub query_queue: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AgentStats {
     pub agent: Agent,
     pub runtime: RuntimeInfo,
@@ -318,13 +319,8 @@ req! {
     /// Get information about the Serf agent.
     pub stats() -> AgentStats
 }
-fn deserialize_payload<'de, D>(de: D) -> Result<Vec<u8>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde_bytes::deserialize(de)
-}
-#[derive(Deserialize, Debug)]
+
+#[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "Event")]
 pub enum StreamMessage {
     #[serde(rename = "user")]
@@ -334,7 +330,7 @@ pub enum StreamMessage {
         #[serde(rename = "Name")]
         name: String,
         #[serde(rename = "Payload")]
-        #[serde(deserialize_with = "deserialize_payload")]
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
         #[serde(rename = "Coalesce")]
         coalesce: bool,
@@ -359,6 +355,7 @@ pub enum StreamMessage {
         #[serde(rename = "Members")]
         members: Vec<Member>,
     },
+    #[serde(rename = "query")]
     Query {
         #[serde(rename = "ID")]
         id: u64,
@@ -367,7 +364,8 @@ pub enum StreamMessage {
         #[serde(rename = "Name")]
         name: String,
         #[serde(rename = "Payload")]
-        payload: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        payload: Option<Vec<u8>>,
     },
 }
 res!(StreamMessage);
@@ -379,4 +377,53 @@ stream! {
     }
 }
 
-// TODO: query
+#[derive(Deserialize, Debug)]
+#[serde(tag = "Type")]
+pub enum QueryResponse {
+    #[serde(rename = "ack")]
+    Ack {
+        #[serde(rename = "From")]
+        from: String,
+    },
+    #[serde(rename = "response")]
+    Response {
+        #[serde(rename = "From")]
+        from: String,
+        #[serde(rename = "Payload")]
+        #[serde(with = "serde_bytes")]
+        payload: Option<Vec<u8>>,
+    },
+    #[serde(rename = "done")]
+    Done,
+}
+res!(QueryResponse);
+
+#[derive(Default, Debug)]
+pub struct QueryParams {
+    pub request_ack: Option<bool>,
+    pub relay_factor: Option<u8>,
+    pub timeout: Option<Duration>,
+    pub filter_nodes: Option<Vec<String>>,
+    pub filter_tags: Option<HashMap<String, String>>,
+}
+
+stream! {
+    "query"
+    /// The query command dispatches a custom user query into a Serf cluster, efficiently
+    /// broadcasting the query to all nodes, and gathering responses.
+    /// <https://github.com/hashicorp/serf/blob/master/docs/commands/query.html.markdown>
+    /// <https://github.com/hashicorp/serf/blob/master/docs/agent/rpc.html.markdown#query>
+    pub query(
+        name: &str,
+        payload: &[u8],
+        params: QueryParams
+    ) -> QueryResponse {
+        "FilterNodes": &params.filter_nodes,
+        "FilterTags": &params.filter_tags,
+        "Timeout": &params.timeout.map(|x| x.as_nanos()),
+        "RequestAck": &params.request_ack.unwrap_or(true),
+        "RelayFactor": &params.relay_factor.unwrap_or_default(),
+        "Name": name,
+        "Payload": payload
+    }
+}

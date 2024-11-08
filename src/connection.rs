@@ -1,13 +1,14 @@
 use crate::protocol::ResponseHeader;
 use crate::{DispatchMap, SeqRead};
-use io::{BufReader, Write};
 use log::{error, info};
 use std::error::Error;
 use std::fmt::Display;
-use std::io;
+use std::io::{BufReader, Write};
+use std::net::Shutdown;
 use std::sync::mpsc::RecvError;
 use std::sync::{Arc, Mutex};
 use std::{
+    io,
     net::{SocketAddr, TcpStream},
     sync::mpsc::Receiver,
 };
@@ -105,11 +106,10 @@ impl ClientConnection {
         tx_handle: JoinHandle<SerfResult>,
         rx_handle: JoinHandle<SerfResult>,
     ) {
-        let (thread, join_result) = loop {
+        let (thread, join_result) =
             tokio::select! {
-                res = tx_handle => break ("write", res),
-                res = rx_handle => break ("read", res),
-            }
+                res = tx_handle => ("write", res),
+                res = rx_handle => ("read", res),
         };
         let error = match join_result {
             Ok(Ok(_)) => Err(SerfError::Internal(
@@ -122,7 +122,7 @@ impl ClientConnection {
         error!("Error in connection {thread} thread: {error:?}");
 
         info!("Cleaning up Serf threads");
-        drop(stream);
+        stream.shutdown(Shutdown::Both).ok();
 
         info!("Cleaning up existing Serf requests by responding with an error");
         for (_, value) in dispatch.lock().unwrap().map.drain() {
