@@ -324,7 +324,7 @@ where
 {
     serde_bytes::deserialize(de)
 }
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "Event")]
 pub enum StreamMessage {
     #[serde(rename = "user")]
