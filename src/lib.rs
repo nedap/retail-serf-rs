@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use connection::ClientConnection;
 use io::BufReader;
+use log::{debug};
 use protocol::RequestHeader;
+use rmpv::decode::read_value;
 use serde::de::DeserializeOwned;
 const MAX_IPC_VERSION: u32 = 1;
 
@@ -32,7 +34,9 @@ pub struct SeqRead<'a>(&'a mut BufReader<TcpStream>);
 impl<'a> SeqRead<'a> {
     fn read_msg<T: DeserializeOwned + Debug>(self) -> T {
         // annoyingly, we pretty much have to panic, because otherwise the reader is left in an invalid state
-        rmp_serde::from_read(self.0).unwrap()
+        let value = read_value(self.0).unwrap();
+        debug!("<== {:?}", value);
+        T::deserialize(value).unwrap()
     }
 }
 
