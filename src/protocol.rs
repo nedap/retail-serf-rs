@@ -219,7 +219,7 @@ req! {
 req! {
     "tags"
     /// Modifies the tags of the current node
-    pub tags(add_tags: &HashMap<String, String>, delete_tags: &[&str]) -> MembersResponse {
+    pub tags(add_tags: &HashMap<String, String>, delete_tags: &[&str]) -> () {
         "Tags": add_tags,
         "DeleteTags": delete_tags
     }
